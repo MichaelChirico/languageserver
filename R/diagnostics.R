@@ -183,28 +183,25 @@ diagnose_file <- function(uri, content, is_rmarkdown = FALSE, globals = NULL, ca
 
     if (nzchar(path) && is_rmarkdown) {
         lints <- lint_literate_file(path, content, linters, cache)
-    } else if (nzchar(path)) {
-        lints <- lintr::lint(path,
-            cache = cache,
-            text = content,
-            parse_settings = TRUE,
-            linters = linters
-        )
-        if (!terminal_newline && !lintr_supports_text_terminal_newline()) {
-            has_terminal_newline_lint <- any(vapply(lints, function(lint) {
-                identical(lint$message, "Add a terminal newline.")
-            }, logical(1L)))
-            if (!has_terminal_newline_lint) {
-                lints <- c(lints, lint_without_terminal_newline(path, content, linters, cache))
-            }
-        }
     } else {
-        lints <- lintr::lint(
-            text = content,
-            cache = cache,
-            parse_settings = TRUE,
-            linters = linters
-        )
+        if (nzchar(path)) {
+            lints <- lintr::lint(path,
+                cache = cache,
+                text = content,
+                parse_settings = TRUE,
+                linters = linters
+            )
+        } else {
+            lints <- lintr::lint(
+                text = content,
+                cache = cache,
+                parse_settings = TRUE,
+                linters = linters
+            )
+        }
+        if (!terminal_newline && (!nzchar(path) || !lintr_supports_text_terminal_newline())) {
+            lints <- c(lints, lint_without_terminal_newline(path, content, linters, cache))
+        }
     }
 
     diagnostics <- lapply(lints, diagnostic_from_lint, content = content)
