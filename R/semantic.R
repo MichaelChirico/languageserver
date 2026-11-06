@@ -46,6 +46,20 @@ SemanticTokenModifiers <- list(
 )
 
 semantic_declaration_modifier <- bitwShiftL(1L, SemanticTokenModifiers$declaration)
+semantic_readonly_default_modifier <- bitwOr(
+    bitwShiftL(1L, SemanticTokenModifiers$readonly),
+    bitwShiftL(1L, SemanticTokenModifiers$defaultLibrary)
+)
+
+semantic_boolean_constants <- c("TRUE", "FALSE", "T", "F")
+semantic_numeric_builtin_constants <- c(
+    "Inf", "NaN", "NA",
+    "NA_integer_", "NA_real_", "NA_complex_", "NA_character_"
+)
+
+is_semantic_ellipsis_symbol <- function(text) {
+    text == "..." | grepl("^\\.\\.[0-9]+$", text)
+}
 
 #' Parse-data ids of body symbols resolving to enclosing `SYMBOL_FORMALS`
 #' @noRd
@@ -184,6 +198,8 @@ semantic_parse_data <- function(data, content, syntax = NULL) {
         REPEAT = SemanticTokenTypes$keyword,
         NEXT = SemanticTokenTypes$keyword,
         BREAK = SemanticTokenTypes$keyword,
+        NULL_CONST = SemanticTokenTypes$keyword,
+        PLACEHOLDER = SemanticTokenTypes$variable,
         NUM_CONST = SemanticTokenTypes$number,
         INT_CONST = SemanticTokenTypes$number,
         FLOAT_CONST = SemanticTokenTypes$number,
@@ -263,6 +279,16 @@ semantic_parse_data <- function(data, content, syntax = NULL) {
     is_return <- tok == "SYMBOL_FUNCTION_CALL" & txt == "return"
     types[is_return] <- SemanticTokenTypes$keyword
 
+    is_null_or_placeholder <- tok %in% c("NULL_CONST", "PLACEHOLDER")
+    modifiers[is_null_or_placeholder] <- semantic_readonly_default_modifier
+
+    is_bool_num <- tok == "NUM_CONST" & txt %in% semantic_boolean_constants
+    types[is_bool_num] <- SemanticTokenTypes$keyword
+    modifiers[is_bool_num] <- semantic_readonly_default_modifier
+
+    is_na_inf <- tok == "NUM_CONST" & txt %in% semantic_numeric_builtin_constants
+    modifiers[is_na_inf] <- semantic_readonly_default_modifier
+
     member_or_ns_parents <- data$parent[
         data$token %in% c("'$'", "'@'", "$", "@", "NS_GET", "NS_GET_INT") &
             data$parent > 0L
@@ -273,6 +299,15 @@ semantic_parse_data <- function(data, content, syntax = NULL) {
         is_param_ref <- plain_sym & (row_ids %in% param_sym_ids)
         types[is_param_ref] <- SemanticTokenTypes$parameter
     }
+    is_ellipsis_sym <- plain_sym & is_semantic_ellipsis_symbol(txt)
+    types[is_ellipsis_sym] <- SemanticTokenTypes$variable
+    modifiers[is_ellipsis_sym] <- semantic_readonly_default_modifier
+
+    is_tf_sym <- plain_sym &
+        !(row_ids %in% param_sym_ids) &
+        (txt %in% c("T", "F"))
+    types[is_tf_sym] <- SemanticTokenTypes$keyword
+    modifiers[is_tf_sym] <- semantic_readonly_default_modifier
 
     fun_lhs_ids <- function_assignment_symbol_ids(data, syntax)
     if (length(fun_lhs_ids)) {
@@ -393,6 +428,8 @@ get_token_type <- function(token_name) {
         "REPEAT" = SemanticTokenTypes$keyword,
         "NEXT" = SemanticTokenTypes$keyword,
         "BREAK" = SemanticTokenTypes$keyword,
+        "NULL_CONST" = SemanticTokenTypes$keyword,
+        "PLACEHOLDER" = SemanticTokenTypes$variable,
         "NUM_CONST" = SemanticTokenTypes$number,
         "INT_CONST" = SemanticTokenTypes$number,
         "FLOAT_CONST" = SemanticTokenTypes$number,
@@ -479,6 +516,8 @@ extract_semantic_tokens <- function(uri, workspace, document, range = NULL) {
         self::REPEAT or
         self::NEXT or
         self::BREAK or
+        self::NULL_CONST or
+        self::PLACEHOLDER or
         self::NUM_CONST or
         self::INT_CONST or
         self::FLOAT_CONST or
@@ -562,12 +601,20 @@ extract_semantic_tokens <- function(uri, workspace, document, range = NULL) {
                 ),
                 "xml_missing"
             )) {
-                formal_names <- setdiff(
-                    xml_text(xml_find_all(token_node, "./ancestor::expr/SYMBOL_FORMALS")),
-                    "..."
-                )
-                if (tok_text %in% formal_names) {
-                    token_type <- SemanticTokenTypes$parameter
+                if (is_semantic_ellipsis_symbol(tok_text)) {
+                    token_type <- SemanticTokenTypes$variable
+                    modifiers <- semantic_readonly_default_modifier
+                } else {
+                    formal_names <- setdiff(
+                        xml_text(xml_find_all(token_node, "./ancestor::expr/SYMBOL_FORMALS")),
+                        "..."
+                    )
+                    if (tok_text %in% formal_names) {
+                        token_type <- SemanticTokenTypes$parameter
+                    } else if (tok_text %in% c("T", "F")) {
+                        token_type <- SemanticTokenTypes$keyword
+                        modifiers <- semantic_readonly_default_modifier
+                    }
                 }
             }
         } else if (token_name == "SYMBOL_FUNCTION_CALL") {
@@ -576,6 +623,15 @@ extract_semantic_tokens <- function(uri, workspace, document, range = NULL) {
             }
         } else if (token_name == "SYMBOL_FORMALS") {
             modifiers <- semantic_declaration_modifier
+        } else if (token_name %in% c("NULL_CONST", "PLACEHOLDER")) {
+            modifiers <- semantic_readonly_default_modifier
+        } else if (token_name == "NUM_CONST") {
+            if (tok_text %in% semantic_boolean_constants) {
+                token_type <- SemanticTokenTypes$keyword
+                modifiers <- semantic_readonly_default_modifier
+            } else if (tok_text %in% semantic_numeric_builtin_constants) {
+                modifiers <- semantic_readonly_default_modifier
+            }
         }
 
         # Convert positions to UTF-16 code units for LSP
